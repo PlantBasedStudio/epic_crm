@@ -46,8 +46,15 @@ pip install -r requirements.txt
 ```
 
 ### 5. Configuration de la base de données
-Créer un utilisateur et une base de données dans PostgreSQL comme décrit dans les instructions précédentes.
-Configurer le fichier .env avec les informations de connexion à la base de données.
+Créer un utilisateur et une base de données dans PostgreSQL (A installer localement sur la machine)
+Pour cette démo j'ai utilisé le serveur localhost avec des paramètres admin et j'ai créer un utilisateur, nom de compte et mdp : user/user. A changer en cas de mise en production.
+Configurer le fichier .env avec les informations de connexion à la base de données que vous avez configuré en local.
+Puis lancer la création des tables : 
+
+```
+python db_operations.py
+
+```
 
 ### 6. Lancer l'application
 Exécutez le fichier principal pour démarrer l'application :
