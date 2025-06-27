@@ -1,10 +1,11 @@
 class Client:
-    def __init__(self, full_name, email, phone, company_name, creation_date, commercial_contact=None):
+    def __init__(self, full_name, email, phone, company_name, creation_date, last_update, commercial_contact=None):
         self.full_name = full_name
         self.email = email
         self.phone = phone
         self.company_name = company_name
         self.creation_date = creation_date
+        self.last_update = last_update
         self.commercial_contact = commercial_contact
         self.contracts = []
 
