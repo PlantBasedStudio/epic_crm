@@ -1,9 +1,9 @@
 from sqlalchemy import (
     create_engine, Column, Integer, String, ForeignKey, 
-    DateTime, Boolean, Text, Numeric, UniqueConstraint
+    DateTime, Boolean, Text, Numeric, UniqueConstraint, text
 )
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
 from passlib.hash import pbkdf2_sha256
 from dotenv import load_dotenv
 import os
@@ -26,11 +26,10 @@ class Client(Base):
     email = Column(String(100), unique=True, nullable=False)
     phone = Column(String(20), nullable=False)
     company_name = Column(String(100), nullable=False)
-    creation_date = Column(DateTime, nullable=False, default=datetime.now(timezone.utc))
-    last_update = Column(DateTime, default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc), nullalbe=True)
+    creation_date = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    last_update = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), nullable=True)
     commercial_contact_id = Column(Integer, ForeignKey('users.id'))
     
-    # Relations
     contracts = relationship("Contract", back_populates="client", cascade="all, delete-orphan")
     commercial_contact = relationship("User", foreign_keys=[commercial_contact_id])
 
@@ -45,10 +44,9 @@ class Contract(Base):
     commercial_contact_id = Column(Integer, ForeignKey('users.id'), nullable=False)
     total_amount = Column(Numeric(10, 2), nullable=False)
     remaining_amount = Column(Numeric(10, 2), nullable=False)
-    creation_date = Column(DateTime, nullable=False, default=datetime.now(timezone.utc))
+    creation_date = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     is_signed = Column(Boolean, nullable=False, default=False)
     
-    # Relations
     client = relationship("Client", back_populates="contracts")
     commercial_contact = relationship("User", foreign_keys=[commercial_contact_id])
     events = relationship("Event", back_populates="contract", cascade="all, delete-orphan")
@@ -69,7 +67,6 @@ class Event(Base):
     attendees_count = Column(Integer, nullable=False)
     notes = Column(Text)
     
-    # Relations
     contract = relationship("Contract", back_populates="events")
     support_contact = relationship("User", foreign_keys=[support_contact_id])
 
@@ -77,7 +74,6 @@ class Event(Base):
         return f"<Event(id={self.id}, name='{self.name}', contract_id={self.contract_id})>"
 
     def get_client_info(self):
-        """Return client information related to this event"""
         if self.contract and self.contract.client:
             return {
                 "client_name": self.contract.client.full_name,
@@ -93,7 +89,6 @@ class Department(Base):
     name = Column(String(50), unique=True, nullable=False)
     description = Column(String(200))
     
-    # Relations
     users = relationship("User", back_populates="department")
 
     def __repr__(self):
@@ -106,77 +101,35 @@ class User(Base):
     employee_id = Column(String(20), unique=True, nullable=False)
     name = Column(String(100), nullable=False)
     email = Column(String(100), unique=True, nullable=False)
-    hashed_password = Column(String(255), nullable=False)
+    password_hash = Column(String(255), nullable=False)
     department_id = Column(Integer, ForeignKey('departments.id'), nullable=False)
-    is_active = Column(Boolean, nullable=False, default=True)
-    created_at = Column(DateTime, nullable=False, default=datetime.now(timezone.utc))
+    creation_date = Column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     
-    # Relations
     department = relationship("Department", back_populates="users")
-
-    def __repr__(self):
-        return f"<User(id={self.id}, name='{self.name}', department_id={self.department_id})>"
+    
+    __table_args__ = (
+        UniqueConstraint('employee_id', name='uq_employee_id'),
+        UniqueConstraint('email', name='uq_email'),
+    )
 
     def set_password(self, password):
-        """Hash and set the password"""
-        self.hashed_password = pbkdf2_sha256.hash(password)
+        self.password_hash = pbkdf2_sha256.hash(password)
 
-    def verify_password(self, password):
-        """Verify the password"""
-        return pbkdf2_sha256.verify(password, self.hashed_password)
+    def check_password(self, password):
+        return pbkdf2_sha256.verify(password, self.password_hash)
 
+    def __repr__(self):
+        return f"<User(id={self.id}, name='{self.name}', department='{self.department.name if self.department else None}')>"
 
 class DatabaseManager:
-    """Database manager using Singleton pattern"""
-    
-    _instance = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-    
     def __init__(self):
-        if not hasattr(self, 'initialized'):
-            self.engine = None
-            self.Session = None
-            self.initialized = True
-    
-    def init_database(self):
-        """Initialize database connection"""
-        try:
-            username = os.environ.get('DB_USERNAME')
-            password = os.environ.get('DB_PASSWORD')
-            db_name = os.environ.get('DB_NAME')
-            host = os.environ.get('DB_HOST', 'localhost')
-            port = os.environ.get('DB_PORT', '5432')
-            
-            if not all([username, password, db_name]):
-                raise ValueError("Missing database environment variables")
-            
-            database_uri = f"postgresql://{username}:{password}@{host}:{port}/{db_name}"
-            
-            self.engine = create_engine(
-                database_uri,
-                echo=False,  # Set True for SQL debug
-                pool_size=5,
-                max_overflow=10,
-                pool_pre_ping=True
-            )
-            
-            self.Session = sessionmaker(bind=self.engine)
-            
-            Base.metadata.create_all(self.engine)
-            logger.info("Database initialized successfully")
-            
-        except Exception as e:
-            logger.error(f"Error initializing database: {e}")
-            raise
-    
+        self.db_url = os.getenv('DATABASE_URL', 'postgresql://epic_user:epic_password@localhost/epic_crm')
+        self.engine = create_engine(self.db_url, echo=False)
+        self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
+
     @contextmanager
     def get_session(self):
-        """Context manager for database sessions"""
-        session = self.Session()
+        session = self.SessionLocal()
         try:
             yield session
             session.commit()
@@ -187,24 +140,59 @@ class DatabaseManager:
         finally:
             session.close()
 
+    def drop_and_create_database(self):
+        try:
+            admin_engine = create_engine('postgresql://epic_user:epic_password@localhost/postgres')
+            
+            with admin_engine.connect() as conn:
+                conn.execute(text("COMMIT"))
+                conn.execute(text("DROP DATABASE IF EXISTS epic_crm"))
+                conn.execute(text("CREATE DATABASE epic_crm"))
+                logger.info("Database dropped and recreated successfully")
+                
+        except Exception as e:
+            logger.error(f"Error dropping/creating database: {e}")
+            raise
+
+    def init_database(self):
+        try:
+            self.drop_and_create_database()
+            
+            Base.metadata.create_all(self.engine)
+            logger.info("Database tables created successfully")
+            
+        except Exception as e:
+            logger.error(f"Error initializing database: {e}")
+            raise
 
 def init_departments():
-    """Initialize default departments"""
+    db = DatabaseManager()
+    
+    departments_data = [
+        {"name": "Commercial", "description": "Sales and client relationship management"},
+        {"name": "Support", "description": "Event organization and customer support"},
+        {"name": "Management", "description": "Administration and management"}
+    ]
+    
+    with db.get_session() as session:
+        for dept_data in departments_data:
+            department = Department(**dept_data)
+            session.add(department)
+            logger.info(f"Created department: {dept_data['name']}")
+
+def authenticate_user(email, password):
     db = DatabaseManager()
     
     with db.get_session() as session:
-        if session.query(Department).count() == 0:
-            departments = [
-                Department(name="Commercial", description="Commercial team"),
-                Department(name="Support", description="Support team"),
-                Department(name="Management", description="Management team")
-            ]
-            
-            for dept in departments:
-                session.add(dept)
-            
-            logger.info("Departments initialized")
-
+        user = session.query(User).filter_by(email=email).first()
+        
+        if user and user.check_password(password):
+            logger.info(f"User authenticated successfully: {user.name}")
+            return user
+        
+        logger.warning(f"Authentication failed for: {email}")
+        return None
+    
 
 def create_user(employee_id, name, email, department_name, password):
     """Create a new user"""
@@ -214,8 +202,7 @@ def create_user(employee_id, name, email, department_name, password):
         try:
             department = session.query(Department).filter_by(name=department_name).first()
             if not department:
-                logger.error(f"Department '{department_name}' does not exist")
-                return None
+                raise ValueError(f"Department '{department_name}' not found")
             
             user = User(
                 employee_id=employee_id,
@@ -228,39 +215,26 @@ def create_user(employee_id, name, email, department_name, password):
             session.add(user)
             session.flush()
             
-            logger.info(f"User created: {user.name}")
+            logger.info(f"User created: {name} ({department_name})")
             return user
             
         except IntegrityError as e:
-            logger.error(f"Integrity error creating user: {e}")
-            return None
-
-
-def authenticate_user(email, password):
-    """Authenticate a user"""
-    db = DatabaseManager()
-    
-    with db.get_session() as session:
-        user = session.query(User).filter_by(email=email, is_active=True).first()
-        if user and user.verify_password(password):
-            logger.info(f"Authentication successful for: {email}")
-            return user
-        
-        logger.warning(f"Authentication failed for: {email}")
-        return None
+            logger.error(f"User creation failed - duplicate data: {e}")
+            raise ValueError("Employee ID or email already exists")
+        except Exception as e:
+            logger.error(f"User creation failed: {e}")
+            raise
 
 
 def init_sample_data():
-    """Initialize sample data"""
     db = DatabaseManager()
     
     with db.get_session() as session:
-        if session.query(Client).count() > 0:
-            logger.info("Sample data already exists")
-            return
-        
         try:
             commercial_dept = session.query(Department).filter_by(name="Commercial").first()
+            support_dept = session.query(Department).filter_by(name="Support").first()
+            management_dept = session.query(Department).filter_by(name="Management").first()
+            
             commercial_user = User(
                 employee_id="COM001",
                 name="Bill Boquet",
@@ -269,6 +243,25 @@ def init_sample_data():
             )
             commercial_user.set_password("password123")
             session.add(commercial_user)
+            
+            support_user = User(
+                employee_id="SUP001",
+                name="Kate Hastroff",
+                email="kate.hastroff@epic.com",
+                department_id=support_dept.id
+            )
+            support_user.set_password("password123")
+            session.add(support_user)
+            
+            management_user = User(
+                employee_id="MAN001",
+                name="Alice Manager",
+                email="alice.manager@epic.com",
+                department_id=management_dept.id
+            )
+            management_user.set_password("admin123")
+            session.add(management_user)
+            
             session.flush()
             
             client = Client(
@@ -285,8 +278,8 @@ def init_sample_data():
                 client_id=client.id,
                 commercial_contact_id=commercial_user.id,
                 total_amount=10000.00,
-                remaining_amount=10000.00,
-                is_signed=False
+                remaining_amount=5000.00,
+                is_signed=True
             )
             session.add(contract)
             session.flush()
@@ -296,6 +289,7 @@ def init_sample_data():
                 name="Lou Bouzin General Assembly",
                 start_date=datetime(2023, 5, 5, 15, 0),
                 end_date=datetime(2023, 5, 5, 17, 0),
+                support_contact_id=support_user.id,
                 location="Salle des fêtes de Mufflins",
                 attendees_count=200,
                 notes="General assembly of shareholders (~200 people)."
@@ -308,7 +302,6 @@ def init_sample_data():
             logger.error(f"Error creating sample data: {e}")
             raise
 
-
 if __name__ == "__main__":
     db = DatabaseManager()
     db.init_database()
@@ -316,13 +309,27 @@ if __name__ == "__main__":
     init_departments()
     init_sample_data()
     
-    user = authenticate_user("bill.boquet@epic.com", "password123")
-    if user:
-        print(f"User logged in: {user.name} - Department: {user.department.name}")
+    print("Database initialization completed!")
+    
+    test_users = [
+        ("bill.boquet@epic.com", "password123"),
+        ("kate.hastroff@epic.com", "password123"),
+        ("alice.manager@epic.com", "admin123")
+    ]
+    
+    for email, password in test_users:
+        user = authenticate_user(email, password)
+        if user:
+            print(f"{user.name} ({user.department.name})")
+        else:
+            print(f"Failed: {email}")
     
     with db.get_session() as session:
-        events = session.query(Event).all()
-        for event in events:
-            client_info = event.get_client_info()
-            print(f"Event: {event.name}")
-            print(f"Client: {client_info}")
+        clients_count = session.query(Client).count()
+        contracts_count = session.query(Contract).count()
+        events_count = session.query(Event).count()
+        
+        print(f"\nDatabase Summary:")
+        print(f"   - {clients_count} clients")
+        print(f"   - {contracts_count} contracts")
+        print(f"   - {events_count} events")
