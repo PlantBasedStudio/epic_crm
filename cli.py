@@ -7,8 +7,15 @@ import sys
 import logging
 from datetime import datetime
 from functools import wraps
-from db_operations import DatabaseManager, authenticate_user, create_user, Client, Contract, Event, User
+from db_operations import (
+    DatabaseManager, authenticate_user, create_user, update_user, delete_user,
+    update_contract, update_event, Client, Contract, Event, User, Department
+)
 from auth import auth_manager, AuthenticationError, AuthorizationError
+from sentry_logging import (
+    init_sentry, capture_exception, log_user_creation, log_user_modification,
+    log_user_deletion, log_contract_signed
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +25,12 @@ class CLIError(Exception):
 
 class EpicEventsInteractive:
     """Interactive CLI handler"""
-    
+
     def __init__(self):
         self.db = DatabaseManager()
         self.current_user = None
         self.running = True
+        init_sentry()
     
     def is_authenticated(self):
         """Check if user is authenticated"""
@@ -59,35 +67,45 @@ class EpicEventsInteractive:
                 if not password:
                     print("Please enter a password.")
                     continue
-                
-                self.db.init_database()
-                
+
                 try:
-                    user = authenticate_user(email, password)
-                    if not user:
+                    user_data = authenticate_user(email, password)
+                    if not user_data:
                         print("Invalid credentials. Please check your email and password.")
                         print("Type 'back' to return to main menu or try again.")
                         continue
-                    
-                    token = auth_manager.generate_token(user)
+
+                    # mock test token
+                    class UserForToken:
+                        def __init__(self, data):
+                            self.id = data['id']
+                            self.employee_id = data['employee_id']
+                            self.name = data['name']
+                            self.email = data['email']
+                            self.department = type('Department', (), {'name': data['department']})()
+
+                    user_obj = UserForToken(user_data)
+                    token = auth_manager.generate_token(user_obj)
                     auth_manager.store_token(token)
-                    
-                    print(f"\nWelcome {user.name}!")
-                    print(f"Department: {user.department.name}")
+
+                    print(f"\nWelcome {user_data['name']}!")
+                    print(f"Department: {user_data['department']}")
                     print("Authentication successful.\n")
-                    
-                    self.current_user = user
+
+                    self.current_user = user_data
                     return True
-                    
+
                 except Exception as auth_error:
+                    capture_exception(auth_error)
                     print(f"Authentication error: {auth_error}")
                     print("Type 'back' to return to main menu or try again.")
                     continue
-                    
+
             except KeyboardInterrupt:
                 print("\nLogin cancelled.")
                 return False
             except Exception as e:
+                capture_exception(e)
                 print(f"Login error: {e}")
                 print("Type 'back' to return to main menu or try again.")
                 continue
@@ -154,19 +172,20 @@ class EpicEventsInteractive:
         """Handle contract commands"""
         if not self.ensure_auth():
             return
-        
+
         while True:
             print("\n=== Contract Management ===")
             print("  list               - List all contracts")
             print("  unsigned           - List unsigned contracts")
             print("  unpaid             - List unpaid contracts")
             print("  create             - Create new contract")
+            print("  update <id>        - Update contract")
             print("  sign <id>          - Sign contract")
             print("  back               - Back to main menu")
             print("  help               - Show this help")
-            
+
             cmd = input("\ncontracts> ").strip().lower()
-            
+
             if cmd == 'back':
                 break
             elif cmd == 'help':
@@ -179,6 +198,12 @@ class EpicEventsInteractive:
                 self.list_contracts(unpaid=True)
             elif cmd == 'create':
                 self.create_contract()
+            elif cmd.startswith('update '):
+                try:
+                    contract_id = int(cmd.split()[1])
+                    self.update_contract(contract_id)
+                except (IndexError, ValueError):
+                    print("Usage: update <contract_id>")
             elif cmd.startswith('sign '):
                 try:
                     contract_id = int(cmd.split()[1])
@@ -192,19 +217,20 @@ class EpicEventsInteractive:
         """Handle event commands"""
         if not self.ensure_auth():
             return
-        
+
         while True:
             print("\n=== Event Management ===")
             print("  list               - List all events")
             print("  no-support         - List events without support")
             print("  my-events          - List my events (Support only)")
             print("  create             - Create new event")
+            print("  update <id>        - Update event")
             print("  assign <id>        - Assign support to event")
             print("  back               - Back to main menu")
             print("  help               - Show this help")
-            
+
             cmd = input("\nevents> ").strip().lower()
-            
+
             if cmd == 'back':
                 break
             elif cmd == 'help':
@@ -217,6 +243,12 @@ class EpicEventsInteractive:
                 self.list_events(my_events=True)
             elif cmd == 'create':
                 self.create_event()
+            elif cmd.startswith('update '):
+                try:
+                    event_id = int(cmd.split()[1])
+                    self.update_event(event_id)
+                except (IndexError, ValueError):
+                    print("Usage: update <event_id>")
             elif cmd.startswith('assign '):
                 try:
                     event_id = int(cmd.split()[1])
@@ -230,21 +262,23 @@ class EpicEventsInteractive:
         """Handle user commands"""
         if not self.ensure_auth():
             return
-        
+
         user = auth_manager.get_current_user()
         if user['department'] != 'Management':
             print("Access denied. User management is for Management department only.")
             return
-        
+
         while True:
             print("\n=== User Management ===")
             print("  list               - List all users")
             print("  create             - Create new user")
+            print("  update <id>        - Update user")
+            print("  delete <id>        - Delete user")
             print("  back               - Back to main menu")
             print("  help               - Show this help")
-            
+
             cmd = input("\nusers> ").strip().lower()
-            
+
             if cmd == 'back':
                 break
             elif cmd == 'help':
@@ -253,6 +287,18 @@ class EpicEventsInteractive:
                 self.list_users()
             elif cmd == 'create':
                 self.create_user()
+            elif cmd.startswith('update '):
+                try:
+                    user_id = int(cmd.split()[1])
+                    self.update_user(user_id)
+                except (IndexError, ValueError):
+                    print("Usage: update <user_id>")
+            elif cmd.startswith('delete '):
+                try:
+                    user_id = int(cmd.split()[1])
+                    self.delete_user(user_id)
+                except (IndexError, ValueError):
+                    print("Usage: delete <user_id>")
             else:
                 print("Unknown command. Type 'help' for available commands or 'back' to return to main menu.")
     
@@ -277,6 +323,7 @@ class EpicEventsInteractive:
                     print("-" * 80)
                     
         except Exception as e:
+            capture_exception(e)
             print(f"Error listing clients: {e}")
     
     def create_client(self):
@@ -351,6 +398,7 @@ class EpicEventsInteractive:
                 print(f"Assigned to: {commercial_user.name}")
                 
         except Exception as e:
+            capture_exception(e)
             print(f"Error creating client: {e}")
     
     def update_client(self, client_id):
@@ -402,6 +450,7 @@ class EpicEventsInteractive:
                     print("No fields updated.")
                     
         except Exception as e:
+            capture_exception(e)
             print(f"Error updating client: {e}")
     
     def list_contracts(self, unsigned=False, unpaid=False):
@@ -435,6 +484,7 @@ class EpicEventsInteractive:
                     print("-" * 100)
                     
         except Exception as e:
+            capture_exception(e)
             print(f"Error listing contracts: {e}")
     
     def create_contract(self):
@@ -523,6 +573,7 @@ class EpicEventsInteractive:
                 print(f"Remaining: ${remaining:.2f}")
                 
         except Exception as e:
+            capture_exception(e)
             print(f"Error creating contract: {e}")
     
     def sign_contract(self, contract_id):
@@ -552,10 +603,164 @@ class EpicEventsInteractive:
                 
                 contract.is_signed = True
                 print(f"Contract #{contract_id} signed successfully!")
-                
+
+                log_contract_signed(
+                    user_info=user,
+                    contract_info={
+                        'id': contract_id,
+                        'client_name': contract.client.full_name,
+                        'total_amount': float(contract.total_amount)
+                    }
+                )
+
         except Exception as e:
+            capture_exception(e)
             print(f"Error signing contract: {e}")
-    
+
+    def update_contract(self, contract_id):
+        """Update a contract"""
+        try:
+            user = auth_manager.get_current_user()
+
+            with self.db.get_session() as session:
+                contract = session.query(Contract).filter_by(id=contract_id).first()
+                if not contract:
+                    print(f"Contract with ID {contract_id} not found.")
+                    return
+
+                if user['department'] == 'Commercial':
+                    current_user = session.query(User).filter_by(email=user['email']).first()
+                    if contract.commercial_contact_id != current_user.id:
+                        print("You can only update contracts for your own clients.")
+                        return
+                elif user['department'] != 'Management':
+                    print("Access denied. Only Commercial (own contracts) or Management can update contracts.")
+                    return
+
+                print(f"\n=== Update Contract #{contract.id} ===")
+                print(f"Client: {contract.client.full_name}")
+                print("Press Enter to keep current value, type 'cancel' to abort")
+
+                total_input = input(f"Total amount ({contract.total_amount:.2f}): ").strip()
+                if total_input.lower() == 'cancel':
+                    print("Contract update cancelled.")
+                    return
+
+                remaining_input = input(f"Remaining amount ({contract.remaining_amount:.2f}): ").strip()
+                if remaining_input.lower() == 'cancel':
+                    print("Contract update cancelled.")
+                    return
+
+                try:
+                    total_amount = float(total_input) if total_input else None
+                    remaining_amount = float(remaining_input) if remaining_input else None
+                except ValueError:
+                    print("Invalid amount format. Please enter valid numbers.")
+                    return
+
+            update_contract(
+                contract_id,
+                total_amount=total_amount,
+                remaining_amount=remaining_amount
+            )
+            print(f"Contract #{contract_id} updated successfully!")
+
+        except Exception as e:
+            capture_exception(e)
+            print(f"Error updating contract: {e}")
+
+    def update_event(self, event_id):
+        """Update an event"""
+        try:
+            user = auth_manager.get_current_user()
+
+            with self.db.get_session() as session:
+                event = session.query(Event).filter_by(id=event_id).first()
+                if not event:
+                    print(f"Event with ID {event_id} not found.")
+                    return
+
+                if user['department'] == 'Support':
+                    current_user = session.query(User).filter_by(email=user['email']).first()
+                    if event.support_contact_id != current_user.id:
+                        print("You can only update events assigned to you.")
+                        return
+                elif user['department'] != 'Management':
+                    print("Access denied. Only Support (own events) or Management can update events.")
+                    return
+
+                print(f"\n=== Update Event: {event.name} ===")
+                print("Press Enter to keep current value, type 'cancel' to abort")
+
+                name = input(f"Name ({event.name}): ").strip()
+                if name.lower() == 'cancel':
+                    print("Event update cancelled.")
+                    return
+
+                start_date = input(f"Start date ({event.start_date.strftime('%Y-%m-%d %H:%M')}): ").strip()
+                if start_date.lower() == 'cancel':
+                    print("Event update cancelled.")
+                    return
+
+                end_date = input(f"End date ({event.end_date.strftime('%Y-%m-%d %H:%M')}): ").strip()
+                if end_date.lower() == 'cancel':
+                    print("Event update cancelled.")
+                    return
+
+                location = input(f"Location ({event.location}): ").strip()
+                if location.lower() == 'cancel':
+                    print("Event update cancelled.")
+                    return
+
+                attendees_input = input(f"Attendees ({event.attendees_count}): ").strip()
+                if attendees_input.lower() == 'cancel':
+                    print("Event update cancelled.")
+                    return
+
+                notes = input(f"Notes ({event.notes or 'None'}): ").strip()
+                if notes.lower() == 'cancel':
+                    print("Event update cancelled.")
+                    return
+
+                start_dt = None
+                end_dt = None
+                if start_date:
+                    try:
+                        start_dt = datetime.strptime(start_date, '%Y-%m-%d %H:%M')
+                    except ValueError:
+                        print("Invalid start date format. Please use YYYY-MM-DD HH:MM")
+                        return
+
+                if end_date:
+                    try:
+                        end_dt = datetime.strptime(end_date, '%Y-%m-%d %H:%M')
+                    except ValueError:
+                        print("Invalid end date format. Please use YYYY-MM-DD HH:MM")
+                        return
+
+                attendees = None
+                if attendees_input:
+                    try:
+                        attendees = int(attendees_input)
+                    except ValueError:
+                        print("Invalid number of attendees.")
+                        return
+
+            update_event(
+                event_id,
+                name=name if name else None,
+                start_date=start_dt,
+                end_date=end_dt,
+                location=location if location else None,
+                attendees_count=attendees,
+                notes=notes if notes else None
+            )
+            print(f"Event updated successfully!")
+
+        except Exception as e:
+            capture_exception(e)
+            print(f"Error updating event: {e}")
+
     def list_events(self, no_support=False, my_events=False):
         """List events with optional filters"""
         try:
@@ -599,6 +804,7 @@ class EpicEventsInteractive:
                     print("-" * 120)
                     
         except Exception as e:
+            capture_exception(e)
             print(f"Error listing events: {e}")
     
     def create_event(self):
@@ -739,6 +945,7 @@ class EpicEventsInteractive:
                 print(f"Attendees: {attendees}")
                 
         except Exception as e:
+            capture_exception(e)
             print(f"Error creating event: {e}")
     
     def assign_support(self, event_id):
@@ -782,6 +989,7 @@ class EpicEventsInteractive:
                 print(f"Support user '{support_user.name}' assigned to event '{event.name}'!")
                 
         except Exception as e:
+            capture_exception(e)
             print(f"Error assigning support: {e}")
     
     def list_users(self):
@@ -804,6 +1012,7 @@ class EpicEventsInteractive:
                     print("-" * 80)
                     
         except Exception as e:
+            capture_exception(e)
             print(f"Error listing users: {e}")
     
     def create_user(self):
@@ -876,12 +1085,139 @@ class EpicEventsInteractive:
                 print(f"Employee ID: {employee_id}")
                 print(f"Email: {email}")
                 print(f"Department: {department}")
+
+                current_user = auth_manager.get_current_user()
+                log_user_creation(
+                    user_info=current_user,
+                    created_user_info={'name': name, 'email': email, 'department': department}
+                )
             else:
                 print("Error: Failed to create user.")
-                
+
         except Exception as e:
+            capture_exception(e)
             print(f"Error creating user: {e}")
-    
+
+    def update_user(self, user_id):
+        """Update an existing user"""
+        try:
+            with self.db.get_session() as session:
+                user = session.query(User).filter_by(id=user_id).first()
+                if not user:
+                    print(f"User with ID {user_id} not found.")
+                    return
+
+                print(f"\n=== Update User: {user.name} ===")
+                print("Press Enter to keep current value, type 'cancel' to abort")
+
+                name = input(f"Name ({user.name}): ").strip()
+                if name.lower() == 'cancel':
+                    print("User update cancelled.")
+                    return
+
+                email = input(f"Email ({user.email}): ").strip()
+                if email.lower() == 'cancel':
+                    print("User update cancelled.")
+                    return
+
+                print(f"Current department: {user.department.name}")
+                print("Available departments: Commercial, Support, Management")
+                department = input(f"Department ({user.department.name}): ").strip()
+                if department.lower() == 'cancel':
+                    print("User update cancelled.")
+                    return
+
+                import getpass
+                password = getpass.getpass("New password (leave empty to keep current): ")
+                if password.lower() == 'cancel':
+                    print("User update cancelled.")
+                    return
+
+                if password and len(password) < 6:
+                    print("Error: Password must be at least 6 characters long.")
+                    return
+
+                if department and department not in ['Commercial', 'Support', 'Management']:
+                    print("Error: Invalid department. Must be Commercial, Support, or Management.")
+                    return
+
+            old_name = user.name
+            old_email = user.email
+            old_department = user.department.name
+
+            updated = update_user(
+                user_id,
+                name=name if name else None,
+                email=email if email else None,
+                department_name=department if department else None,
+                password=password if password else None
+            )
+
+            if updated:
+                print(f"\nUser updated successfully!")
+
+                changes = []
+                if name:
+                    changes.append(f"name: {old_name} -> {name}")
+                if email:
+                    changes.append(f"email: {old_email} -> {email}")
+                if department:
+                    changes.append(f"department: {old_department} -> {department}")
+                if password:
+                    changes.append("password changed")
+
+                current_user = auth_manager.get_current_user()
+                log_user_modification(
+                    user_info=current_user,
+                    modified_user_info={'name': name or old_name, 'email': email or old_email},
+                    changes=", ".join(changes) if changes else "No changes"
+                )
+            else:
+                print("Error: Failed to update user.")
+
+        except Exception as e:
+            capture_exception(e)
+            print(f"Error updating user: {e}")
+
+    def delete_user(self, user_id):
+        """Delete a user"""
+        try:
+            current_user = auth_manager.get_current_user()
+
+            with self.db.get_session() as session:
+                user = session.query(User).filter_by(id=user_id).first()
+                if not user:
+                    print(f"User with ID {user_id} not found.")
+                    return
+
+                if user.email == current_user['email']:
+                    print("Error: You cannot delete yourself.")
+                    return
+
+                print(f"\n=== Delete User: {user.name} ===")
+                print(f"Employee ID: {user.employee_id}")
+                print(f"Email: {user.email}")
+                print(f"Department: {user.department.name}")
+
+                confirm = input("\nAre you sure you want to delete this user? (yes/no): ").strip().lower()
+                if confirm != 'yes':
+                    print("User deletion cancelled.")
+                    return
+
+                deleted_user_info = {'name': user.name, 'email': user.email}
+
+            delete_user(user_id)
+            print(f"User deleted successfully!")
+
+            log_user_deletion(
+                user_info=current_user,
+                deleted_user_info=deleted_user_info
+            )
+
+        except Exception as e:
+            capture_exception(e)
+            print(f"Error deleting user: {e}")
+
     def run(self):
         """Main interactive loop"""
         print("=== Epic Events CRM ===")
@@ -947,6 +1283,7 @@ class EpicEventsInteractive:
                 print("\nGoodbye!")
                 break
             except Exception as e:
+                capture_exception(e)
                 print(f"Error: {e}")
 
 @click.group()
@@ -966,22 +1303,29 @@ def interactive():
 def login(email, password):
     """Login to Epic Events CRM"""
     try:
-        db = DatabaseManager()
-        db.init_database()
-        
-        user = authenticate_user(email, password)
-        if not user:
+        user_data = authenticate_user(email, password)
+        if not user_data:
             click.echo("Authentication failed. Please check your credentials.", err=True)
             sys.exit(1)
-    
-        token = auth_manager.generate_token(user)
+
+        class UserForToken:
+            def __init__(self, data):
+                self.id = data['id']
+                self.employee_id = data['employee_id']
+                self.name = data['name']
+                self.email = data['email']
+                self.department = type('Department', (), {'name': data['department']})()
+
+        user_obj = UserForToken(user_data)
+        token = auth_manager.generate_token(user_obj)
         auth_manager.store_token(token)
-        
-        click.echo(f"Welcome {user.name}!")
-        click.echo(f"Department: {user.department.name}")
+
+        click.echo(f"Welcome {user_data['name']}!")
+        click.echo(f"Department: {user_data['department']}")
         click.echo("Authentication successful. You can now use the CRM.")
-        
+
     except Exception as e:
+        capture_exception(e)
         logger.error(f"Login error: {e}")
         click.echo(f"Login failed: {e}", err=True)
         sys.exit(1)

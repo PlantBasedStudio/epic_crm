@@ -1,6 +1,6 @@
 from sqlalchemy import (
-    create_engine, Column, Integer, String, ForeignKey, 
-    DateTime, Boolean, Text, Numeric, UniqueConstraint, text
+    create_engine, Column, Integer, String, ForeignKey,
+    DateTime, Boolean, Text, Numeric, UniqueConstraint
 )
 from sqlalchemy.orm import sessionmaker, relationship, declarative_base
 from sqlalchemy.exc import IntegrityError, OperationalError, ProgrammingError
@@ -123,7 +123,13 @@ class User(Base):
 
 class DatabaseManager:
     def __init__(self):
-        self.db_url = os.getenv('DATABASE_URL', 'postgresql://epic_user:epic_password@localhost/epic_crm')
+        db_user = os.getenv('DB_USERNAME', 'user')
+        db_password = os.getenv('DB_PASSWORD', 'user')
+        db_host = os.getenv('DB_HOST', 'localhost')
+        db_port = os.getenv('DB_PORT', '5432')
+        db_name = os.getenv('DB_NAME', 'epic')
+
+        self.db_url = f'postgresql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}'
         self.engine = create_engine(self.db_url, echo=False)
         self.SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=self.engine)
 
@@ -140,27 +146,21 @@ class DatabaseManager:
         finally:
             session.close()
 
-    def drop_and_create_database(self):
+    def init_database(self, drop_tables=True):
+        """
+        Initialize the database by creating all tables.
+        If drop_tables=True, existing tables will be dropped first.
+        """
         try:
-            admin_engine = create_engine('postgresql://epic_user:epic_password@localhost/postgres')
-            
-            with admin_engine.connect() as conn:
-                conn.execute(text("COMMIT"))
-                conn.execute(text("DROP DATABASE IF EXISTS epic_crm"))
-                conn.execute(text("CREATE DATABASE epic_crm"))
-                logger.info("Database dropped and recreated successfully")
-                
-        except Exception as e:
-            logger.error(f"Error dropping/creating database: {e}")
-            raise
+            if drop_tables:
+                # Drop
+                Base.metadata.drop_all(self.engine)
+                logger.info("Existing tables dropped successfully")
 
-    def init_database(self):
-        try:
-            self.drop_and_create_database()
-            
+            # Create
             Base.metadata.create_all(self.engine)
             logger.info("Database tables created successfully")
-            
+
         except Exception as e:
             logger.error(f"Error initializing database: {e}")
             raise
@@ -181,15 +181,26 @@ def init_departments():
             logger.info(f"Created department: {dept_data['name']}")
 
 def authenticate_user(email, password):
+    """
+    Authenticate a user and return user data as a dictionary.
+    Returns None if authentication fails.
+    """
     db = DatabaseManager()
-    
+
     with db.get_session() as session:
         user = session.query(User).filter_by(email=email).first()
-        
+
         if user and user.check_password(password):
             logger.info(f"User authenticated successfully: {user.name}")
-            return user
-        
+            return {
+                'id': user.id,
+                'employee_id': user.employee_id,
+                'name': user.name,
+                'email': user.email,
+                'department_id': user.department_id,
+                'department': user.department.name if user.department else None
+            }
+
         logger.warning(f"Authentication failed for: {email}")
         return None
     
@@ -217,12 +228,161 @@ def create_user(employee_id, name, email, department_name, password):
             
             logger.info(f"User created: {name} ({department_name})")
             return user
-            
+
         except IntegrityError as e:
             logger.error(f"User creation failed - duplicate data: {e}")
             raise ValueError("Employee ID or email already exists")
         except Exception as e:
             logger.error(f"User creation failed: {e}")
+            raise
+
+
+def update_user(user_id, name=None, email=None, department_name=None, password=None):
+    """Update an existing user"""
+    db = DatabaseManager()
+
+    with db.get_session() as session:
+        try:
+            user = session.query(User).filter_by(id=user_id).first()
+            if not user:
+                raise ValueError(f"User with ID {user_id} not found")
+
+            if name:
+                user.name = name
+            if email:
+                existing = session.query(User).filter(User.email == email, User.id != user_id).first()
+                if existing:
+                    raise ValueError(f"Email '{email}' already in use")
+                user.email = email
+            if department_name:
+                department = session.query(Department).filter_by(name=department_name).first()
+                if not department:
+                    raise ValueError(f"Department '{department_name}' not found")
+                user.department_id = department.id
+            if password:
+                user.set_password(password)
+
+            logger.info(f"User updated: {user.name}")
+            return user
+
+        except IntegrityError as e:
+            logger.error(f"User update failed - duplicate data: {e}")
+            raise ValueError("Email already exists")
+        except Exception as e:
+            logger.error(f"User update failed: {e}")
+            raise
+
+
+def delete_user(user_id):
+    """Delete a user"""
+    db = DatabaseManager()
+
+    with db.get_session() as session:
+        try:
+            user = session.query(User).filter_by(id=user_id).first()
+            if not user:
+                raise ValueError(f"User with ID {user_id} not found")
+
+            clients_count = session.query(Client).filter_by(commercial_contact_id=user_id).count()
+            if clients_count > 0:
+                raise ValueError(f"Cannot delete user: {clients_count} clients are assigned to this user")
+
+            contracts_count = session.query(Contract).filter_by(commercial_contact_id=user_id).count()
+            if contracts_count > 0:
+                raise ValueError(f"Cannot delete user: {contracts_count} contracts are assigned to this user")
+
+            events_count = session.query(Event).filter_by(support_contact_id=user_id).count()
+            if events_count > 0:
+                raise ValueError(f"Cannot delete user: {events_count} events are assigned to this user")
+
+            user_name = user.name
+            session.delete(user)
+            logger.info(f"User deleted: {user_name}")
+            return True
+
+        except Exception as e:
+            logger.error(f"User deletion failed: {e}")
+            raise
+
+
+def update_contract(contract_id, total_amount=None, remaining_amount=None, is_signed=None, commercial_contact_id=None):
+    """Update an existing contract"""
+    db = DatabaseManager()
+
+    with db.get_session() as session:
+        try:
+            contract = session.query(Contract).filter_by(id=contract_id).first()
+            if not contract:
+                raise ValueError(f"Contract with ID {contract_id} not found")
+
+            if total_amount is not None:
+                if total_amount <= 0:
+                    raise ValueError("Total amount must be positive")
+                contract.total_amount = total_amount
+            if remaining_amount is not None:
+                if remaining_amount < 0:
+                    raise ValueError("Remaining amount cannot be negative")
+                if remaining_amount > (total_amount or contract.total_amount):
+                    raise ValueError("Remaining amount cannot exceed total amount")
+                contract.remaining_amount = remaining_amount
+            if is_signed is not None:
+                contract.is_signed = is_signed
+            if commercial_contact_id is not None:
+                commercial = session.query(User).filter_by(id=commercial_contact_id).first()
+                if not commercial:
+                    raise ValueError(f"User with ID {commercial_contact_id} not found")
+                contract.commercial_contact_id = commercial_contact_id
+
+            logger.info(f"Contract updated: {contract.id}")
+            return contract
+
+        except Exception as e:
+            logger.error(f"Contract update failed: {e}")
+            raise
+
+
+def update_event(event_id, name=None, start_date=None, end_date=None, location=None,
+                attendees_count=None, notes=None, support_contact_id=None):
+    """Update an existing event"""
+    db = DatabaseManager()
+
+    with db.get_session() as session:
+        try:
+            event = session.query(Event).filter_by(id=event_id).first()
+            if not event:
+                raise ValueError(f"Event with ID {event_id} not found")
+
+            if name:
+                event.name = name
+            if start_date:
+                event.start_date = start_date
+            if end_date:
+                event.end_date = end_date
+            if location:
+                event.location = location
+            if attendees_count is not None:
+                if attendees_count <= 0:
+                    raise ValueError("Number of attendees must be positive")
+                event.attendees_count = attendees_count
+            if notes is not None:
+                event.notes = notes
+            if support_contact_id is not None:
+                if support_contact_id == 0:
+                    event.support_contact_id = None
+                else:
+                    support = session.query(User).filter_by(id=support_contact_id).first()
+                    if not support:
+                        raise ValueError(f"User with ID {support_contact_id} not found")
+                    support_dept = session.query(Department).filter_by(name='Support').first()
+                    if support.department_id != support_dept.id:
+                        raise ValueError("User must be from Support department")
+                    event.support_contact_id = support_contact_id
+
+            logger.info(f"Event updated: {event.name}")
+            return event
+
+        except Exception as e:
+            logger.error(f"Event update failed: {e}")
             raise
 
 
@@ -305,31 +465,37 @@ def init_sample_data():
 if __name__ == "__main__":
     db = DatabaseManager()
     db.init_database()
-    
+
     init_departments()
     init_sample_data()
-    
+
     print("Database initialization completed!")
-    
+
     test_users = [
         ("bill.boquet@epic.com", "password123"),
         ("kate.hastroff@epic.com", "password123"),
         ("alice.manager@epic.com", "admin123")
     ]
-    
-    for email, password in test_users:
-        user = authenticate_user(email, password)
-        if user:
-            print(f"{user.name} ({user.department.name})")
-        else:
-            print(f"Failed: {email}")
-    
+
+    print("\nTesting user authentication:")
+    with db.get_session() as session:
+        for email, password in test_users:
+            user = session.query(User).filter_by(email=email).first()
+            if user and user.check_password(password):
+                print(f"  [OK] {user.name} ({user.department.name})")
+            else:
+                print(f"  [FAIL] {email}")
+
     with db.get_session() as session:
         clients_count = session.query(Client).count()
         contracts_count = session.query(Contract).count()
         events_count = session.query(Event).count()
-        
+        users_count = session.query(User).count()
+
         print(f"\nDatabase Summary:")
+        print(f"   - {users_count} users")
         print(f"   - {clients_count} clients")
         print(f"   - {contracts_count} contracts")
         print(f"   - {events_count} events")
+
+    print("\nInitialization complete! You can now run: python cli.py")

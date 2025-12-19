@@ -8,7 +8,6 @@ from pathlib import Path
 from db_operations import DatabaseManager, init_departments, init_sample_data
 from cli import cli
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -22,11 +21,8 @@ def main():
         print("=== Epic Events CRM ===")
         print("Initializing application...")
         
-        # Initialize database
         db = DatabaseManager()
         db.init_database()
-        
-        # Initialize base data
         init_departments()
         init_sample_data()
         cli()

@@ -30,7 +30,6 @@ class AuthManager:
         self.token_expiry = timedelta(hours=24)
         self.token_file = Path.home() / '.epic_events_token'
         
-        # Role-based permissions
         self.permissions = {
             'Commercial': [
                 'create_client',
@@ -90,7 +89,7 @@ class AuthManager:
         try:
             with open(self.token_file, 'w') as f:
                 json.dump({'token': token, 'created_at': datetime.utcnow().isoformat()}, f)
-            # Secure the file (only readable by owner)
+            # 0o600 owner can read et wirte
             os.chmod(self.token_file, 0o600)
         except Exception as e:
             logger.error(f"Error storing token: {e}")
@@ -154,5 +153,4 @@ class AuthManager:
             return func(*args, **kwargs)
         return wrapper
 
-# Global auth manager instance
 auth_manager = AuthManager()
